@@ -25,7 +25,8 @@ fetch() { # url sha256 file
   [ "$(shasum -a 256 "$3" | cut -d' ' -f1)" = "$2" ] || { echo "checksum mismatch: $3" >&2; rm -f "$3"; exit 1; }
 }
 
-rm -rf "$B"; mkdir -p "$B/dl"
+# Owned by us and private: fail if someone else recreated it in between.
+rm -rf "$B"; mkdir -m 700 "$B"; mkdir "$B/dl"
 fetch "$SDL_URL" "$SDL_SHA256" "$B/dl/sdl.tar.gz"
 fetch "$LIBUSB_URL" "$LIBUSB_SHA256" "$B/dl/libusb.tar.bz2"
 
