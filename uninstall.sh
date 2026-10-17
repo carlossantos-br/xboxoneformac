@@ -53,8 +53,10 @@ for w in "${WRAPPERS[@]+"${WRAPPERS[@]}"}"; do
   fi
 done
 
-say "Removing the controller service (asks for your password)"
 if [ -e "$PLIST" ] || [ -d "$DEST" ]; then
+  say "Removing the controller service (asks for your password)"
   as_root /bin/bash "$HERE/uninstall.sh" --system
+else
+  say "Removing the controller service"
 fi
 [ ! -e "$PLIST" ] && [ ! -d "$DEST" ] && info "removed" || info "some files were left in $DEST"
