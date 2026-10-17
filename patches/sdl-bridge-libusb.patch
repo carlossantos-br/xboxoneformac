@@ -1,0 +1,143 @@
+--- a/src/hidapi/SDL_hidapi.c
++++ b/src/hidapi/SDL_hidapi.c
+@@ -364,6 +364,18 @@
+     if (!SDL_HIDAPI_discovery.m_bInitialized) {
+         HIDAPI_InitializeDiscovery();
+     }
++
++#if defined(__MACOSX__) && defined(HAVE_LIBUSB)
++    /* The macOS notifications below only cover IOHIDDevice. Raw USB GIP
++       controllers have no IOHIDDevice, so also rescan the libusb backend. */
++    if (SDL_HIDAPI_discovery.m_bCanGetNotifications) {
++        Uint32 now = SDL_GetTicks();
++        if (!SDL_HIDAPI_discovery.m_unLastDetect || SDL_TICKS_PASSED(now, SDL_HIDAPI_discovery.m_unLastDetect + 3000)) {
++            ++SDL_HIDAPI_discovery.m_unDeviceChangeCounter;
++            SDL_HIDAPI_discovery.m_unLastDetect = now;
++        }
++    }
++#endif
+ 
+     if (!SDL_HIDAPI_discovery.m_bCanGetNotifications) {
+         const Uint32 SDL_HIDAPI_DETECT_INTERVAL_MS = 3000; /* Update every 3 seconds */
+@@ -714,6 +726,8 @@
+     uint8_t (LIBUSB_CALL *get_device_address)(libusb_device *dev);
+     int (LIBUSB_CALL *open)(libusb_device *dev, libusb_device_handle **dev_handle);
+     void (LIBUSB_CALL *close)(libusb_device_handle *dev_handle);
++    int (LIBUSB_CALL *get_configuration)(libusb_device_handle *dev_handle, int *config);
++    int (LIBUSB_CALL *set_configuration)(libusb_device_handle *dev_handle, int config);
+     int (LIBUSB_CALL *claim_interface)(libusb_device_handle *dev_handle, int interface_number);
+     int (LIBUSB_CALL *release_interface)(libusb_device_handle *dev_handle, int interface_number);
+     int (LIBUSB_CALL *kernel_driver_active)(libusb_device_handle *dev_handle, int interface_number);
+@@ -761,6 +775,8 @@
+ #define libusb_get_device_address           libusb_ctx.get_device_address
+ #define libusb_open                         libusb_ctx.open
+ #define libusb_close                        libusb_ctx.close
++#define libusb_get_configuration            libusb_ctx.get_configuration
++#define libusb_set_configuration            libusb_ctx.set_configuration
+ #define libusb_claim_interface              libusb_ctx.claim_interface
+ #define libusb_release_interface            libusb_ctx.release_interface
+ #define libusb_kernel_driver_active         libusb_ctx.kernel_driver_active
+@@ -832,6 +848,8 @@
+ #undef libusb_get_device_address
+ #undef libusb_open
+ #undef libusb_close
++#undef libusb_get_configuration
++#undef libusb_set_configuration
+ #undef libusb_claim_interface
+ #undef libusb_release_interface
+ #undef libusb_kernel_driver_active
+@@ -887,6 +905,8 @@
+     Uint16 vendor;
+     Uint16 product;
+ } SDL_libusb_whitelist[] = {
++    /* xboxoneformac: original wired Xbox One, which has no macOS HID driver. */
++    { 0x045e, 0x02d1 },
+     { 0x057e, 0x0337 } /* Nintendo WUP-028, Wii U/Switch GameCube Adapter */
+ };
+ 
+@@ -1131,6 +1151,8 @@
+             LOAD_LIBUSB_SYMBOL(get_device_address)
+             LOAD_LIBUSB_SYMBOL(open)
+             LOAD_LIBUSB_SYMBOL(close)
++            LOAD_LIBUSB_SYMBOL(get_configuration)
++            LOAD_LIBUSB_SYMBOL(set_configuration)
+             LOAD_LIBUSB_SYMBOL(claim_interface)
+             LOAD_LIBUSB_SYMBOL(release_interface)
+             LOAD_LIBUSB_SYMBOL(kernel_driver_active)
+--- a/src/hidapi/libusb/hid.c
++++ b/src/hidapi/libusb/hid.c
+@@ -1265,6 +1265,25 @@
+ 							break;
+ 						}
+ 						good_open = 1;
++
++#if defined(__MACOSX__)
++                        /* The original Xbox One has no macOS class driver to
++                           select its USB configuration after a cable reconnect. */
++                        if (desc.idVendor == 0x045e && desc.idProduct == 0x02d1) {
++                            int active_config = -1;
++                            res = libusb_get_configuration(dev->device_handle, &active_config);
++                            if (res == 0 && active_config == 0) {
++                                res = libusb_set_configuration(dev->device_handle, conf_desc->bConfigurationValue);
++                            }
++                            if (res < 0) {
++                                LOG("can't configure original Xbox One USB device: %d\n", res);
++                                free(dev_path);
++                                libusb_close(dev->device_handle);
++                                good_open = 0;
++                                break;
++                            }
++                        }
++#endif
+ 
+ #ifdef DETACH_KERNEL_DRIVER
+ 						/* Detach the kernel driver, but only if the
+--- a/src/joystick/hidapi/SDL_hidapi_xboxone.c
++++ b/src/joystick/hidapi/SDL_hidapi_xboxone.c
+@@ -355,7 +355,11 @@
+ static SDL_bool HIDAPI_DriverXboxOne_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GameControllerType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
+ {
+ #if defined(__MACOSX__) && defined(SDL_JOYSTICK_MFI)
+-    if (!SDL_IsJoystickBluetoothXboxOne(vendor_id, product_id)) {
++    /* xboxoneformac: this exact USB GIP device uses libusb,
++       not the shortened Apple GameController HID reports described below. */
++    if (!SDL_IsJoystickBluetoothXboxOne(vendor_id, product_id) &&
++        !(vendor_id == 0x045e && product_id == 0x02d1 &&
++          interface_class == 0xff && interface_subclass == 71 && interface_protocol == 208)) {
+         /* On macOS we get a shortened version of the real report and
+            you can't write output reports for wired controllers, so
+            we'll just use the GCController support instead.
+--- a/src/joystick/hidapi/SDL_hidapijoystick.c
++++ b/src/joystick/hidapi/SDL_hidapijoystick.c
+@@ -1115,6 +1115,19 @@
+                 if (device) {
+                     device->seen = SDL_TRUE;
+ 
++#if defined(__MACOSX__) && defined(HAVE_LIBUSB)
++                    /* Retry the original Xbox One USB interface after another
++                       process releases its exclusive claim (for example Chrome). */
++                    if (device->vendor_id == 0x045e && device->product_id == 0x02d1 &&
++                        !device->driver && !device->dev) {
++                        SDL_bool removed = SDL_FALSE;
++                        HIDAPI_SetupDeviceDriver(device, &removed);
++                        if (removed) {
++                            continue;
++                        }
++                    }
++#endif
++
+                     /* Check to see if the serial number is available now */
+                     if(HIDAPI_SerialIsEmpty(device)) {
+                         HIDAPI_SetDeviceSerialW(device, info->serial_number);
+--- a/cmake/sdlchecks.cmake
++++ b/cmake/sdlchecks.cmake
+@@ -1240,7 +1240,8 @@
+             # libusb is loaded dynamically, so don't add it to EXTRA_LIBS
+             FindLibraryAndSONAME("usb-1.0" LIBDIRS ${PKG_LIBUSB_LIBRARY_DIRS})
+             if(USB_1.0_LIB)
+-              set(SDL_LIBUSB_DYNAMIC "\"${USB_1.0_LIB_SONAME}\"")
++              # xboxoneformac: load the USB backend from beside this SDL library.
++              set(SDL_LIBUSB_DYNAMIC "\"@loader_path/libusb-1.0.0.dylib\"")
+             endif()
+           endif()
+         endif()

@@ -1,0 +1,17 @@
+--- a/src/joystick/SDL_joystick.c
++++ b/src/joystick/SDL_joystick.c
+@@ -51,7 +51,14 @@
+ #include "./virtual/SDL_virtualjoystick_c.h"
+ #endif
+ 
++#if defined(__MACOSX__)
++#include "SDL_xboxonebridge.inc"
++#endif
++
+ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
++#if defined(__MACOSX__)
++    &SDL_XBOXONEFORMAC_JoystickDriver,
++#endif
+ #ifdef SDL_JOYSTICK_HIDAPI /* Before WINDOWS_ driver, as WINDOWS wants to check if this driver is handling things */
+     &SDL_HIDAPI_JoystickDriver,
+ #endif
